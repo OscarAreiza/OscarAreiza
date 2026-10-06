@@ -4,7 +4,7 @@ bio, tech logos, languages and live GitHub stats.
 GitHub renders an SVG <img> with its own CSS animations but blocks every
 external fetch from inside it, so the pixel font (Pixel Operator, CC0), the
 tech logos and the sprites are embedded as data: URIs, and the stats are baked
-in at generation time. .github/workflows/profile.yml re-runs this daily so the
+in at generation time. .github/workflows/profile.yml re-runs this hourly so the
 numbers stay current.
 
     python3 scripts/make_profile_svg.py        ->  profile.svg (repo root)
@@ -72,62 +72,77 @@ PALETTES = [
 
 
 # ---- stats ------------------------------------------------------------------
+# Everything is account-wide (every repo the account touched: personal, every
+# org), never scoped to one organization. What the token can see bounds it:
+# the Actions default token only sees public repos, GH_STATS_TOKEN sees private.
+ACTIVITY_WEEKS = 13   # ~3 months for the charts
+
 STATS_QUERY = """
-query($login: String!) { user(login: $login) {
-  pullRequests { totalCount }
-  merged: pullRequests(states: MERGED) { totalCount }
-  contributionsCollection {
-    totalCommitContributions
-    totalPullRequestReviewContributions
-    restrictedContributionsCount
-    contributionCalendar {
-      totalContributions
-      weeks { contributionDays { date contributionCount } }
+query($login: String!, $reviewed: String!) {
+  user(login: $login) {
+    pullRequests { totalCount }
+    merged: pullRequests(states: MERGED) { totalCount }
+    contributionsCollection {
+      totalCommitContributions
+      contributionCalendar { totalContributions }
     }
   }
-}}"""
+  reviewed: search(query: $reviewed, type: ISSUE, first: 1) { issueCount }
+}"""
+
+PRS_QUERY = """
+query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { createdAt mergedAt repository { name } } }
+  }
+}"""
 
 
-def fetch_user() -> dict:
+def gql(query: str, variables: dict) -> dict:
     token = os.environ.get("GH_STATS_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         req = urllib.request.Request(
             "https://api.github.com/graphql",
-            data=json.dumps({"query": STATS_QUERY, "variables": {"login": USER}}).encode(),
+            data=json.dumps({"query": query, "variables": variables}).encode(),
             headers={"Authorization": f"bearer {token}", "Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.load(resp)
     else:
-        out = subprocess.run(["gh", "api", "graphql", "-f", f"query={STATS_QUERY}", "-f", f"login={USER}"],
-                             check=True, capture_output=True, text=True).stdout
-        data = json.loads(out)
+        args = ["gh", "api", "graphql", "-f", f"query={query}"]
+        for k, v in variables.items():
+            if v is not None:
+                args += ["-f", f"{k}={v}"]
+        data = json.loads(subprocess.run(args, check=True, capture_output=True, text=True).stdout)
     if data.get("errors"):
         raise SystemExit(f"GitHub API error: {data['errors']}")
-    return data["data"]["user"]
+    return data["data"]
 
 
-def stats_from(u: dict) -> list[tuple[str, str]]:
-    c = u["contributionsCollection"]
-    # Private work only shows up as an anonymous count when the token can't see it.
-    contributions = c["contributionCalendar"]["totalContributions"]
+def fetch_stats() -> list[tuple[str, str]]:
+    d = gql(STATS_QUERY, {"login": USER, "reviewed": f"type:pr reviewed-by:{USER}"})
+    u, c = d["user"], d["user"]["contributionsCollection"]
     return [
         (f"{u['pullRequests']['totalCount']:,}", "Pull Requests"),
         (f"{u['merged']['totalCount']:,}", "Merged PRs"),
+        (f"{d['reviewed']['issueCount']:,}", "Reviewed PRs"),
         (f"{c['totalCommitContributions']:,}", "Commits (1y)"),
-        (f"{contributions:,}", "Contributions (1y)"),
-        (f"{c['totalPullRequestReviewContributions']:,}", "Reviews (1y)"),
+        (f"{c['contributionCalendar']['totalContributions']:,}", "Contributions (1y)"),
     ]
 
 
-ACTIVITY_DAYS = 91   # ~3 months
-
-
-def daily_from(u: dict) -> list[tuple[str, int]]:
-    """(date, contributions) for the last ACTIVITY_DAYS days."""
-    weeks = u["contributionsCollection"]["contributionCalendar"]["weeks"]
-    days = [(d["date"], d["contributionCount"]) for w in weeks for d in w["contributionDays"]]
-    return days[-ACTIVITY_DAYS:]
+def fetch_recent_prs() -> list[dict]:
+    """The account's PRs created or merged in the last ACTIVITY_WEEKS weeks, any repo."""
+    import datetime as dt
+    since = (dt.date.today() - dt.timedelta(weeks=ACTIVITY_WEEKS)).isoformat()
+    q, after, prs = f"author:{USER} is:pr updated:>={since}", None, []
+    while True:
+        s = gql(PRS_QUERY, {"q": q, "after": after})["search"]
+        prs += [n for n in s["nodes"] if n]
+        if not s["pageInfo"]["hasNextPage"]:
+            return prs
+        after = s["pageInfo"]["endCursor"]
 
 
 # Charts are drawn with matplotlib in the profile's palette and pixel font, and
@@ -171,47 +186,69 @@ def _teal():
     return tuple(int(v) / 255 for v in TEAL.split(","))
 
 
-def activity_line(daily: list[tuple[str, int]], width: int, height: int) -> str:
-    """Daily contributions over the last ~3 months, as an area line."""
+def prs_per_week(prs: list[dict], width: int, height: int) -> str:
+    """PRs opened vs merged per week over the last ACTIVITY_WEEKS weeks, any repo."""
     import datetime as dt
 
     import matplotlib.dates as mdates
 
+    today = dt.date.today()
+    this_monday = today - dt.timedelta(days=today.weekday())
+    weeks = [this_monday - dt.timedelta(weeks=i) for i in range(ACTIVITY_WEEKS - 1, -1, -1)]
+    opened, merged = [0] * len(weeks), [0] * len(weeks)
+
+    def bucket(ts: str):
+        d = dt.date.fromisoformat(ts[:10])
+        i = (d - weeks[0]).days // 7
+        return i if 0 <= i < len(weeks) else None
+
+    for pr in prs:
+        if (i := bucket(pr["createdAt"])) is not None:
+            opened[i] += 1
+        if pr["mergedAt"] and (i := bucket(pr["mergedAt"])) is not None:
+            merged[i] += 1
+
     plt, fig, ax = _figure(width, height)
-    xs = [dt.date.fromisoformat(d) for d, _ in daily]
-    ys = [n for _, n in daily]
-    ax.fill_between(xs, ys, color=_teal(), alpha=0.18, linewidth=0)
-    ax.plot(xs, ys, color=_teal(), linewidth=2, solid_capstyle="round")
-    if ys and max(ys):
-        i = ys.index(max(ys))
-        ax.plot([xs[i]], [ys[i]], "o", color="#ffffff", markersize=5)
-        ax.annotate(f"{ys[i]}", (xs[i], ys[i]), textcoords="offset points", xytext=(0, 8),
-                    ha="center", color="#ffffff", fontsize=14)
+    ax.fill_between(weeks, opened, color=_teal(), alpha=0.15, linewidth=0)
+    ax.plot(weeks, opened, color=_teal(), linewidth=2, marker="o", markersize=3.5, label="Opened")
+    ax.plot(weeks, merged, color="#ffffff", linewidth=1.6, marker="o", markersize=3, label="Merged",
+            linestyle=(0, (4, 2)))
     ax.xaxis.set_major_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
-    ax.set_ylim(bottom=0, top=(max(ys) * 1.3 if ys and max(ys) else 1))
-    ax.margins(x=0.01)
+    top = max(opened + merged)
+    ax.set_ylim(bottom=0, top=(top * 1.3 if top else 1))
+    ax.margins(x=0.02)
+    leg = ax.legend(loc="upper left", frameon=False, fontsize=13, handlelength=1.6)
+    for text in leg.get_texts():
+        text.set_color("#dde3ea")
     return _svg(plt, fig)
 
 
-def weekday_bars(daily: list[tuple[str, int]], width: int, height: int) -> str:
-    """Contributions per day of the week over the same ~3 months; busiest day in white."""
+def prs_by_repo(prs: list[dict], width: int, height: int, top_n: int = 6) -> str:
+    """Which repos the account's PRs went to over the same weeks, any owner."""
+    import collections
     import datetime as dt
 
+    since = dt.date.today() - dt.timedelta(weeks=ACTIVITY_WEEKS)
+    counts = collections.Counter(pr["repository"]["name"] for pr in prs
+                                 if dt.date.fromisoformat(pr["createdAt"][:10]) >= since)
+    ranked = counts.most_common(top_n)[::-1]          # biggest at the top
+    names = [n for n, _ in ranked]
+    values = [v for _, v in ranked]
+
     plt, fig, ax = _figure(width, height)
-    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    totals = [0] * 7
-    for d, n in daily:
-        totals[dt.date.fromisoformat(d).weekday()] += n
-    top = max(totals)
-    colors = ["#ffffff" if t == top and top else _teal() for t in totals]
-    bars = ax.bar(names, totals, color=colors, width=0.62)
-    for bar, t in zip(bars, totals):
-        if t:
-            ax.annotate(f"{t}", (bar.get_x() + bar.get_width() / 2, t), textcoords="offset points",
-                        xytext=(0, 4), ha="center", color="#dde3ea", fontsize=13)
-    ax.set_ylim(bottom=0, top=(top * 1.3 if top else 1))
-    ax.set_yticks([])
+    ax.grid(False)
+    ax.spines["bottom"].set_visible(False)
+    colors = [_teal()] * len(values)
+    if values:
+        colors[-1] = "#ffffff"                         # busiest repo in white
+    bars = ax.barh(names, values, color=colors, height=0.6)
+    for bar, v in zip(bars, values):
+        ax.annotate(f"{v}", (v, bar.get_y() + bar.get_height() / 2), textcoords="offset points",
+                    xytext=(4, 0), va="center", color="#dde3ea", fontsize=13)
+    ax.set_xlim(0, (max(values) * 1.25 if values else 1))
+    ax.set_xticks([])
+    ax.tick_params(axis="y", labelsize=13)
     return _svg(plt, fig)
 
 
@@ -219,7 +256,7 @@ def b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode()
 
 
-def build(stats: list[tuple[str, str]], daily: list[tuple[str, int]]) -> str:
+def build(stats: list[tuple[str, str]], prs: list[dict]) -> str:
     rnd = random.Random(SEED)
     css, defs, sky, front = [], [], [], []
 
@@ -342,15 +379,15 @@ def build(stats: list[tuple[str, str]], daily: list[tuple[str, int]]) -> str:
         front.append(f'<text x="{x:.1f}" y="{stat_y + 26}" font-size="16" fill="#dde3ea">{label}</text>')
     front.append("</g>")
 
-    # Under the numbers, one row: 3-month activity line | weekday bars | dancing Rick.
+    # Under the numbers, one row: PRs opened/merged per week | PRs per repo | dancing Rick.
     # Each chart is revealed left-to-right on load.
     row_y, row_h, gap = 672, 200, 20
-    line_w, bars_w = 430, 300
+    line_w, bars_w = 400, 330
     rick_file, rick_frames, rick_fw, rick_fh, rick_ms = RICK
     rick_w = rick_fw
     x = (W - (line_w + bars_w + rick_w + 2 * gap)) / 2
-    for k, (svg_text, w) in enumerate([(activity_line(daily, line_w, row_h), line_w),
-                                       (weekday_bars(daily, bars_w, row_h), bars_w)]):
+    for k, (svg_text, w) in enumerate([(prs_per_week(prs, line_w, row_h), line_w),
+                                       (prs_by_repo(prs, bars_w, row_h), bars_w)]):
         data = base64.b64encode(svg_text.encode()).decode()
         defs.append(f'<clipPath id="reveal{k}"><rect class="wipe" x="{x:.0f}" y="{row_y}" '
                     f'width="{w}" height="{row_h}"/></clipPath>')
@@ -383,9 +420,8 @@ def build(stats: list[tuple[str, str]], daily: list[tuple[str, int]]) -> str:
 
 
 if __name__ == "__main__":
-    user = fetch_user()
-    stats = stats_from(user)
-    svg = build(stats, daily_from(user))
+    stats = fetch_stats()
+    svg = build(stats, fetch_recent_prs())
     out = ROOT / "profile.svg"
     out.write_text(svg)
     print("ok", out, f"{len(svg) / 1024:.0f} KB", stats)
