@@ -50,7 +50,7 @@ RICK = ("rick_sprite.png", 58, 150, 143, 30)  # (file, frames, frame_w, frame_h,
 
 # ---- layout -----------------------------------------------------------------
 W = 1000
-H = 895
+H = 1210
 BG = "#0b0f17"
 TEAL = "0,201,167"
 
@@ -143,6 +143,46 @@ def fetch_recent_prs() -> list[dict]:
         if not s["pageInfo"]["hasNextPage"]:
             return prs
         after = s["pageInfo"]["endCursor"]
+
+
+SKILLS_QUERY = """
+query($q: String!, $after: String) {
+  search(query: $q, type: ISSUE, first: 100, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ... on PullRequest { repository {
+      languages(first: 10, orderBy: {field: SIZE, direction: DESC}) { totalSize edges { size node { name } } }
+    } } }
+  }
+}"""
+# GitHub's language names -> what the profile calls them; None = leave out.
+SKILL_NAMES = {"HCL": "Terraform", "Dockerfile": "Docker", "Go Template": "Go",
+               "Makefile": None, "Smarty": None}
+SKILLS_TOP = 7
+
+
+def fetch_skills() -> list[tuple[str, float]]:
+    """What the account uses most, from code: every PR in the last year (any
+    repo, any owner) adds its repo's language mix, so a repo with 55 PRs weighs
+    55x one with a single PR. Returns (skill, % share), largest first."""
+    import collections
+    import datetime as dt
+    since = (dt.date.today() - dt.timedelta(days=365)).isoformat()
+    q, after, score = f"author:{USER} is:pr created:>={since}", None, collections.Counter()
+    while True:
+        s = gql(SKILLS_QUERY, {"q": q, "after": after})["search"]
+        for n in s["nodes"]:
+            langs = (n or {}).get("repository", {}).get("languages") or {}
+            total = langs.get("totalSize") or 0
+            for e in langs.get("edges", []) if total else []:
+                name = SKILL_NAMES.get(e["node"]["name"], e["node"]["name"])
+                if name:
+                    score[name] += e["size"] / total
+        if not s["pageInfo"]["hasNextPage"]:
+            break
+        after = s["pageInfo"]["endCursor"]
+    top = score.most_common(SKILLS_TOP)
+    total = sum(v for _, v in top) or 1
+    return [(name, v / total * 100) for name, v in top]
 
 
 # Charts are drawn with matplotlib in the profile's palette and pixel font, and
@@ -252,11 +292,46 @@ def prs_by_repo(prs: list[dict], width: int, height: int, top_n: int = 6) -> str
     return _svg(plt, fig)
 
 
+def skills_radar(skills: list[tuple[str, float]], width: int, height: int) -> str:
+    """Radar of the most-used skills, each axis labelled with its share."""
+    import math
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    _figure(1, 1)[0].close("all")                     # register font + rcParams
+    fig = plt.figure(figsize=(width / 100, height / 100), dpi=100)
+    fig.patch.set_alpha(0)
+    ax = fig.add_subplot(projection="polar")
+    ax.set_facecolor("none")
+    if not skills:
+        return _svg(plt, fig)
+    names = [n for n, _ in skills]
+    vals = [v for _, v in skills]
+    angles = [i / len(vals) * 2 * math.pi for i in range(len(vals))]
+    ax.set_theta_offset(math.pi / 2)
+    ax.set_theta_direction(-1)
+    top = max(vals)
+    ax.set_ylim(0, top * 1.08)
+    ax.plot(angles + angles[:1], vals + vals[:1], color=_teal(), linewidth=2)
+    ax.fill(angles + angles[:1], vals + vals[:1], color=_teal(), alpha=0.22)
+    ax.plot(angles, vals, "o", color="#ffffff", markersize=4)
+    ax.set_xticks(angles)
+    ax.set_xticklabels([f"{n}\n{v:.0f}%" for n, v in skills], color="#dde3ea", fontsize=13)
+    ax.tick_params(axis="x", pad=10)
+    ax.set_yticks([top * f for f in (0.25, 0.5, 0.75, 1.0)])
+    ax.set_yticklabels([])
+    ax.grid(color="#ffffff", alpha=0.10)
+    ax.spines["polar"].set_color("#30363d")
+    return _svg(plt, fig)
+
+
 def b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode()
 
 
-def build(stats: list[tuple[str, str]], prs: list[dict]) -> str:
+def build(stats: list[tuple[str, str]], prs: list[dict], skills: list[tuple[str, float]]) -> str:
     rnd = random.Random(SEED)
     css, defs, sky, front = [], [], [], []
 
@@ -379,23 +454,30 @@ def build(stats: list[tuple[str, str]], prs: list[dict]) -> str:
         front.append(f'<text x="{x:.1f}" y="{stat_y + 26}" font-size="16" fill="#dde3ea">{label}</text>')
     front.append("</g>")
 
-    # Under the numbers, one row: PRs opened/merged per week | PRs per repo | dancing Rick.
-    # Each chart is revealed left-to-right on load.
-    row_y, row_h, gap = 672, 200, 20
-    line_w, bars_w = 400, 330
-    rick_file, rick_frames, rick_fw, rick_fh, rick_ms = RICK
-    rick_w = rick_fw
-    x = (W - (line_w + bars_w + rick_w + 2 * gap)) / 2
-    for k, (svg_text, w) in enumerate([(prs_per_week(prs, line_w, row_h), line_w),
-                                       (prs_by_repo(prs, bars_w, row_h), bars_w)]):
+    # Under the numbers: row 1 = PRs opened/merged per week | PRs per repo;
+    # row 2 = skills radar | dancing Rick. Each chart is revealed left-to-right on load.
+    gap = 30
+
+    def chart(k: int, svg_text: str, x: float, y: int, w: int, h: int) -> None:
         data = base64.b64encode(svg_text.encode()).decode()
-        defs.append(f'<clipPath id="reveal{k}"><rect class="wipe" x="{x:.0f}" y="{row_y}" '
-                    f'width="{w}" height="{row_h}"/></clipPath>')
-        front.append(f'<g clip-path="url(#reveal{k})"><image x="{x:.0f}" y="{row_y}" width="{w}" '
-                     f'height="{row_h}" href="data:image/svg+xml;base64,{data}"/></g>')
-        x += w + gap
+        defs.append(f'<clipPath id="reveal{k}"><rect class="wipe" x="{x:.0f}" y="{y}" '
+                    f'width="{w}" height="{h}"/></clipPath>')
+        front.append(f'<g clip-path="url(#reveal{k})"><image x="{x:.0f}" y="{y}" width="{w}" '
+                     f'height="{h}" href="data:image/svg+xml;base64,{data}"/></g>')
+
+    row1_y, row1_h, line_w, bars_w = 672, 210, 470, 400
+    x = (W - (line_w + bars_w + gap)) / 2
+    chart(0, prs_per_week(prs, line_w, row1_h), x, row1_y, line_w, row1_h)
+    chart(1, prs_by_repo(prs, bars_w, row1_h), x + line_w + gap, row1_y, bars_w, row1_h)
+
+    rick_file, rick_frames, rick_fw, rick_fh, rick_ms = RICK
+    row2_y, radar_w, radar_h = row1_y + row1_h + 20, 470, 290
+    x = (W - (radar_w + gap + rick_fw)) / 2
+    chart(2, skills_radar(skills, radar_w, radar_h), x, row2_y, radar_w, radar_h)
     css.append("@keyframes wipe{from{transform:scaleX(0)}to{transform:scaleX(1)}}"
                ".wipe{transform-box:fill-box;transform-origin:left;animation:wipe 2s ease-out 1.2s both}")
+    x += radar_w + gap
+    row_y, row_h = row2_y, radar_h
     front.append(f'<svg class="stats" x="{x:.0f}" y="{row_y + (row_h - rick_fh) / 2:.0f}" width="{rick_fw}" '
                  f'height="{rick_fh}" viewBox="0 0 {rick_fw} {rick_fh}"><image class="rick" '
                  f'width="{rick_fw * rick_frames}" height="{rick_fh}" '
@@ -413,7 +495,8 @@ def build(stats: list[tuple[str, str]], prs: list[dict]) -> str:
 
     aria = (f"{TITLE}. {' '.join(BIO)} {SECTION}: {', '.join(l for _, l in TECH)}. "
             f"{LANG_SECTION}: {', '.join(LANGUAGES)}. "
-            f"{STATS_SECTION}: {', '.join(f'{v} {l}' for v, l in stats)}.")
+            f"{STATS_SECTION}: {', '.join(f'{v} {l}' for v, l in stats)}. "
+            f"Most used: {', '.join(f'{n} {v:.0f}%' for n, v in skills)}.")
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
             f'role="img" aria-label="{aria}"><style>{"".join(css)}</style><defs>{"".join(defs)}</defs>'
             f'<rect width="{W}" height="{H}" fill="{BG}"/>{"".join(sky)}{"".join(front)}</svg>')
@@ -421,7 +504,8 @@ def build(stats: list[tuple[str, str]], prs: list[dict]) -> str:
 
 if __name__ == "__main__":
     stats = fetch_stats()
-    svg = build(stats, fetch_recent_prs())
+    skills = fetch_skills()
+    svg = build(stats, fetch_recent_prs(), skills)
     out = ROOT / "profile.svg"
     out.write_text(svg)
-    print("ok", out, f"{len(svg) / 1024:.0f} KB", stats)
+    print("ok", out, f"{len(svg) / 1024:.0f} KB", stats, [(n, round(v)) for n, v in skills])
