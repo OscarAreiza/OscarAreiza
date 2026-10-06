@@ -4,4 +4,10 @@ FULL_NAME: Oscar Mauricio Areiza Paramo
 GITHUB_USER: OscarAreiza
 -->
 
-<img src="./profile.svg" width="100%" alt="Oscar Areiza. Passionate about Technology, Coding, Web Development, Cloud and DevOps Culture. Systems Engineering student at CORHUILA, Junior DevOps. Languages: Spanish (Native), English (B2). Technologies: Java, HTML5, CSS, Python, PostgreSQL, MySQL, Terraform, AWS, Google Cloud, GitHub.">
+<img src="./profile-top.svg" width="100%" alt="Oscar Areiza. Passionate about Technology, Coding, Web Development, Cloud and DevOps Culture. Systems Engineering student at CORHUILA, Junior DevOps. Technologies: Java, HTML5, CSS, Python, PostgreSQL, MySQL, Terraform, AWS, Google Cloud, GitHub. Languages: Spanish (Native), English (B2).">
+
+<p align="center">
+  <a href="https://git.io/streak-stats"><img src="https://streak-stats.demolab.com?user=OscarAreiza&theme=burnt-neon&border_radius=10&card_width=450" alt="GitHub Streak" /></a>
+</p>
+
+<img src="./profile-bottom.svg" width="100%" alt="Pixel art workspace by @brunopixels">
