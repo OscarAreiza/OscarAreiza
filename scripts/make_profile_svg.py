@@ -46,10 +46,11 @@ SPRITES = [  # (file, frames, frame_w, frame_h, ms_per_frame, side)
     ("bmo_sprite.png", 8, 150, 150, 150, "right"),
 ]
 STATS_SECTION = "Stats"
+ACTIVITY_SECTION = "Activity · last 12 months"
 
 # ---- layout -----------------------------------------------------------------
 W = 1000
-H = 690
+H = 970
 BG = "#0b0f17"
 TEAL = "0,201,167"
 
@@ -79,12 +80,15 @@ query($login: String!) { user(login: $login) {
     totalCommitContributions
     totalPullRequestReviewContributions
     restrictedContributionsCount
-    contributionCalendar { totalContributions }
+    contributionCalendar {
+      totalContributions
+      weeks { contributionDays { date contributionCount } }
+    }
   }
 }}"""
 
 
-def fetch_stats() -> list[tuple[str, str]]:
+def fetch_user() -> dict:
     token = os.environ.get("GH_STATS_TOKEN") or os.environ.get("GITHUB_TOKEN")
     if token:
         req = urllib.request.Request(
@@ -100,7 +104,10 @@ def fetch_stats() -> list[tuple[str, str]]:
         data = json.loads(out)
     if data.get("errors"):
         raise SystemExit(f"GitHub API error: {data['errors']}")
-    u = data["data"]["user"]
+    return data["data"]["user"]
+
+
+def stats_from(u: dict) -> list[tuple[str, str]]:
     c = u["contributionsCollection"]
     # Private work only shows up as an anonymous count when the token can't see it.
     contributions = c["contributionCalendar"]["totalContributions"]
@@ -113,11 +120,68 @@ def fetch_stats() -> list[tuple[str, str]]:
     ]
 
 
+def weekly_from(u: dict) -> list[tuple[str, int]]:
+    """(week start date, contributions that week) for the last year."""
+    weeks = u["contributionsCollection"]["contributionCalendar"]["weeks"]
+    return [(w["contributionDays"][0]["date"], sum(d["contributionCount"] for d in w["contributionDays"]))
+            for w in weeks if w["contributionDays"]]
+
+
+def activity_chart(weekly: list[tuple[str, int]], width: int, height: int) -> str:
+    """Weekly contributions as an area chart, drawn with matplotlib in the
+    profile's palette and pixel font. Returned as SVG text (glyphs as paths, so
+    no font is needed to display it). Fixed hash salt + no date metadata keep
+    the output byte-identical for identical data, so the hourly workflow only
+    commits when activity actually changed."""
+    import datetime as dt
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.dates as mdates
+    import matplotlib.pyplot as plt
+    from matplotlib import font_manager
+
+    font_manager.fontManager.addfont(str(ASSETS / "fonts" / "PixelOperator.ttf"))
+    plt.rcParams.update({"font.family": "Pixel Operator", "font.size": 14,
+                         "svg.hashsalt": "profile", "svg.fonttype": "path"})
+    teal = tuple(int(v) / 255 for v in TEAL.split(","))
+    muted = "#8b98a5"
+
+    xs = [dt.date.fromisoformat(d) for d, _ in weekly]
+    ys = [n for _, n in weekly]
+    fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
+    fig.patch.set_alpha(0)
+    ax.set_facecolor("none")
+    ax.fill_between(xs, ys, color=teal, alpha=0.18, linewidth=0)
+    ax.plot(xs, ys, color=teal, linewidth=2.2, solid_capstyle="round")
+    if ys and max(ys):
+        i = ys.index(max(ys))
+        ax.plot([xs[i]], [ys[i]], "o", color="#ffffff", markersize=5)
+        ax.annotate(f"{ys[i]}", (xs[i], ys[i]), textcoords="offset points", xytext=(0, 8),
+                    ha="center", color="#ffffff", fontsize=14)
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
+    ax.tick_params(colors=muted, length=0, labelsize=13)
+    ax.grid(axis="y", color="#ffffff", alpha=0.07)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color("#30363d")
+    ax.set_ylim(bottom=0, top=(max(ys) * 1.25 if ys and max(ys) else 1))
+    ax.margins(x=0.01)
+    fig.tight_layout(pad=0.4)
+
+    import io
+    buf = io.StringIO()
+    fig.savefig(buf, format="svg", transparent=True, metadata={"Date": None})
+    plt.close(fig)
+    return buf.getvalue()
+
+
 def b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode()
 
 
-def build(stats: list[tuple[str, str]]) -> str:
+def build(stats: list[tuple[str, str]], weekly: list[tuple[str, int]]) -> str:
     rnd = random.Random(SEED)
     css, defs, sky, front = [], [], [], []
 
@@ -240,6 +304,17 @@ def build(stats: list[tuple[str, str]]) -> str:
         front.append(f'<text x="{x:.1f}" y="{stat_y + 26}" font-size="16" fill="#dde3ea">{label}</text>')
     front.append("</g>")
 
+    # Activity: weekly contributions chart, revealed left-to-right on load.
+    chart_w, chart_h, chart_y = 900, 230, 712
+    chart = base64.b64encode(activity_chart(weekly, chart_w, chart_h).encode()).decode()
+    front.append(f'<g class="stats" filter="url(#shadow)" text-anchor="middle">{header(696, ACTIVITY_SECTION)}</g>')
+    defs.append(f'<clipPath id="reveal"><rect class="wipe" x="{cx - chart_w / 2}" y="{chart_y}" '
+                f'width="{chart_w}" height="{chart_h}"/></clipPath>')
+    front.append(f'<g clip-path="url(#reveal)"><image x="{cx - chart_w / 2}" y="{chart_y}" '
+                 f'width="{chart_w}" height="{chart_h}" href="data:image/svg+xml;base64,{chart}"/></g>')
+    css.append("@keyframes wipe{from{transform:scaleX(0)}to{transform:scaleX(1)}}"
+               ".wipe{transform-box:fill-box;transform-origin:left;animation:wipe 2.2s ease-out 1.2s both}")
+
     css.append("@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}"
                ".txt{animation:fadein 1.4s ease-out both}"
                ".icons{animation:fadein 1.4s ease-out .5s both}"
@@ -257,8 +332,9 @@ def build(stats: list[tuple[str, str]]) -> str:
 
 
 if __name__ == "__main__":
-    stats = fetch_stats()
-    svg = build(stats)
+    user = fetch_user()
+    stats = stats_from(user)
+    svg = build(stats, weekly_from(user))
     out = ROOT / "profile.svg"
     out.write_text(svg)
     print("ok", out, f"{len(svg) / 1024:.0f} KB", stats)

@@ -1,10 +1,11 @@
 name: Update profile stats
 
-# Rebuilds profile.svg with fresh GitHub stats once a day, and on demand from
-# the Actions tab. Commits only when the numbers actually changed.
+# Rebuilds profile.svg (stats + activity chart) every hour, and on demand from
+# the Actions tab. The output is byte-identical for identical data, so it only
+# commits when activity actually changed.
 on:
   schedule:
-    - cron: "17 6 * * *"   # daily, 06:17 UTC
+    - cron: "17 * * * *"   # hourly, at :17
   workflow_dispatch:
 
 permissions:
@@ -23,6 +24,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
+      - name: Install matplotlib
+        run: pip install --quiet matplotlib
 
       - name: Rebuild profile.svg
         env:
