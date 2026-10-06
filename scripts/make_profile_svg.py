@@ -46,11 +46,12 @@ SPRITES = [  # (file, frames, frame_w, frame_h, ms_per_frame, side)
     ("bmo_sprite.png", 8, 150, 150, 150, "right"),
 ]
 STATS_SECTION = "Stats"
-RICK = ("rick_sprite.png", 58, 150, 143, 30)  # (file, frames, frame_w, frame_h, ms_per_frame)
+RICK = ("rick_sprite.png", 29, 280, 266, 60)  # (file, frames, frame_w, frame_h, ms_per_frame)
+CHART_ZOOM = 1.3   # charts shown 30% bigger than drawn, text included
 
 # ---- layout -----------------------------------------------------------------
 W = 1000
-H = 1210
+H = 1360
 BG = "#0b0f17"
 TEAL = "0,201,167"
 
@@ -264,32 +265,6 @@ def prs_per_week(prs: list[dict], width: int, height: int) -> str:
     return _svg(plt, fig)
 
 
-def prs_by_repo(prs: list[dict], width: int, height: int, top_n: int = 6) -> str:
-    """Which repos the account's PRs went to over the same weeks, any owner."""
-    import collections
-    import datetime as dt
-
-    since = dt.date.today() - dt.timedelta(weeks=ACTIVITY_WEEKS)
-    counts = collections.Counter(pr["repository"]["name"] for pr in prs
-                                 if dt.date.fromisoformat(pr["createdAt"][:10]) >= since)
-    ranked = counts.most_common(top_n)[::-1]          # biggest at the top
-    names = [n for n, _ in ranked]
-    values = [v for _, v in ranked]
-
-    plt, fig, ax = _figure(width, height)
-    ax.grid(False)
-    ax.spines["bottom"].set_visible(False)
-    colors = [_teal()] * len(values)
-    if values:
-        colors[-1] = "#ffffff"                         # busiest repo in white
-    bars = ax.barh(names, values, color=colors, height=0.6)
-    for bar, v in zip(bars, values):
-        ax.annotate(f"{v}", (v, bar.get_y() + bar.get_height() / 2), textcoords="offset points",
-                    xytext=(4, 0), va="center", color="#dde3ea", fontsize=13)
-    ax.set_xlim(0, (max(values) * 1.25 if values else 1))
-    ax.set_xticks([])
-    ax.tick_params(axis="y", labelsize=13)
-    return _svg(plt, fig)
 
 
 def skills_radar(skills: list[tuple[str, float]], width: int, height: int) -> str:
@@ -454,30 +429,30 @@ def build(stats: list[tuple[str, str]], prs: list[dict], skills: list[tuple[str,
         front.append(f'<text x="{x:.1f}" y="{stat_y + 26}" font-size="16" fill="#dde3ea">{label}</text>')
     front.append("</g>")
 
-    # Under the numbers: row 1 = PRs opened/merged per week | PRs per repo;
-    # row 2 = skills radar | dancing Rick. Each chart is revealed left-to-right on load.
-    gap = 30
-
-    def chart(k: int, svg_text: str, x: float, y: int, w: int, h: int) -> None:
+    # Under the numbers: left column = PRs opened/merged per week, skills radar
+    # under it; right column = dancing Rick, centred on both. Charts are drawn at
+    # their base size and shown CHART_ZOOM bigger (text included), and revealed
+    # left-to-right on load.
+    def chart(k: int, svg_text: str, x: float, y: float, w: float, h: float) -> None:
         data = base64.b64encode(svg_text.encode()).decode()
-        defs.append(f'<clipPath id="reveal{k}"><rect class="wipe" x="{x:.0f}" y="{y}" '
-                    f'width="{w}" height="{h}"/></clipPath>')
-        front.append(f'<g clip-path="url(#reveal{k})"><image x="{x:.0f}" y="{y}" width="{w}" '
-                     f'height="{h}" href="data:image/svg+xml;base64,{data}"/></g>')
+        defs.append(f'<clipPath id="reveal{k}"><rect class="wipe" x="{x:.0f}" y="{y:.0f}" '
+                    f'width="{w:.0f}" height="{h:.0f}"/></clipPath>')
+        front.append(f'<g clip-path="url(#reveal{k})"><image x="{x:.0f}" y="{y:.0f}" width="{w:.0f}" '
+                     f'height="{h:.0f}" href="data:image/svg+xml;base64,{data}"/></g>')
 
-    row1_y, row1_h, line_w, bars_w = 672, 210, 470, 400
-    x = (W - (line_w + bars_w + gap)) / 2
-    chart(0, prs_per_week(prs, line_w, row1_h), x, row1_y, line_w, row1_h)
-    chart(1, prs_by_repo(prs, bars_w, row1_h), x + line_w + gap, row1_y, bars_w, row1_h)
-
-    rick_file, rick_frames, rick_fw, rick_fh, rick_ms = RICK
-    row2_y, radar_w, radar_h = row1_y + row1_h + 20, 470, 290
-    x = (W - (radar_w + gap + rick_fw)) / 2
-    chart(2, skills_radar(skills, radar_w, radar_h), x, row2_y, radar_w, radar_h)
+    z, margin, gap = CHART_ZOOM, 25, 15
+    col_y, line_w, line_h, radar_w, radar_h = 672, 470, 210, 470, 290
+    chart(0, prs_per_week(prs, line_w, line_h), margin, col_y, line_w * z, line_h * z)
+    radar_y = col_y + line_h * z + gap
+    chart(1, skills_radar(skills, radar_w, radar_h), margin, radar_y, radar_w * z, radar_h * z)
     css.append("@keyframes wipe{from{transform:scaleX(0)}to{transform:scaleX(1)}}"
                ".wipe{transform-box:fill-box;transform-origin:left;animation:wipe 2s ease-out 1.2s both}")
-    x += radar_w + gap
-    row_y, row_h = row2_y, radar_h
+
+    rick_file, rick_frames, rick_fw, rick_fh, rick_ms = RICK
+    col_h = line_h * z + gap + radar_h * z
+    right_x = margin + line_w * z + gap
+    x = right_x + (W - margin - right_x - rick_fw) / 2
+    row_y, row_h = col_y, col_h
     front.append(f'<svg class="stats" x="{x:.0f}" y="{row_y + (row_h - rick_fh) / 2:.0f}" width="{rick_fw}" '
                  f'height="{rick_fh}" viewBox="0 0 {rick_fw} {rick_fh}"><image class="rick" '
                  f'width="{rick_fw * rick_frames}" height="{rick_fh}" '
