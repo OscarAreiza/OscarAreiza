@@ -1,0 +1,45 @@
+name: Update profile stats
+
+# Rebuilds profile.svg with fresh GitHub stats once a day, and on demand from
+# the Actions tab. Commits only when the numbers actually changed.
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: profile-stats
+  cancel-in-progress: true
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Rebuild profile.svg
+        env:
+          # A read-only personal token (secret GH_STATS_TOKEN) also counts work in
+          # private org repos; without it the default token sees public activity only.
+          GH_STATS_TOKEN: ${{ secrets.GH_STATS_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 scripts/make_profile_svg.py
+
+      - name: Commit if changed
+        run: |
+          if git diff --quiet -- profile.svg; then
+            echo "Stats unchanged."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add profile.svg
+          git commit -m "Update profile stats"
+          git push
