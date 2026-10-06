@@ -46,11 +46,11 @@ SPRITES = [  # (file, frames, frame_w, frame_h, ms_per_frame, side)
     ("bmo_sprite.png", 8, 150, 150, 150, "right"),
 ]
 STATS_SECTION = "Stats"
-ACTIVITY_SECTION = "Activity · last 12 months"
+RICK = ("rick_sprite.png", 58, 150, 143, 30)  # (file, frames, frame_w, frame_h, ms_per_frame)
 
 # ---- layout -----------------------------------------------------------------
 W = 1000
-H = 970
+H = 895
 BG = "#0b0f17"
 TEAL = "0,201,167"
 
@@ -120,40 +120,68 @@ def stats_from(u: dict) -> list[tuple[str, str]]:
     ]
 
 
-def weekly_from(u: dict) -> list[tuple[str, int]]:
-    """(week start date, contributions that week) for the last year."""
+ACTIVITY_DAYS = 91   # ~3 months
+
+
+def daily_from(u: dict) -> list[tuple[str, int]]:
+    """(date, contributions) for the last ACTIVITY_DAYS days."""
     weeks = u["contributionsCollection"]["contributionCalendar"]["weeks"]
-    return [(w["contributionDays"][0]["date"], sum(d["contributionCount"] for d in w["contributionDays"]))
-            for w in weeks if w["contributionDays"]]
+    days = [(d["date"], d["contributionCount"]) for w in weeks for d in w["contributionDays"]]
+    return days[-ACTIVITY_DAYS:]
 
 
-def activity_chart(weekly: list[tuple[str, int]], width: int, height: int) -> str:
-    """Weekly contributions as an area chart, drawn with matplotlib in the
-    profile's palette and pixel font. Returned as SVG text (glyphs as paths, so
-    no font is needed to display it). Fixed hash salt + no date metadata keep
-    the output byte-identical for identical data, so the hourly workflow only
-    commits when activity actually changed."""
-    import datetime as dt
+# Charts are drawn with matplotlib in the profile's palette and pixel font, and
+# returned as SVG text (glyphs as paths, so no font is needed to display them).
+# Fixed hash salt + no date metadata keep the output byte-identical for
+# identical data, so the hourly workflow only commits when activity changed.
+MUTED = "#8b98a5"
 
+
+def _figure(width: int, height: int):
     import matplotlib
     matplotlib.use("Agg")
-    import matplotlib.dates as mdates
     import matplotlib.pyplot as plt
     from matplotlib import font_manager
 
     font_manager.fontManager.addfont(str(ASSETS / "fonts" / "PixelOperator.ttf"))
     plt.rcParams.update({"font.family": "Pixel Operator", "font.size": 14,
                          "svg.hashsalt": "profile", "svg.fonttype": "path"})
-    teal = tuple(int(v) / 255 for v in TEAL.split(","))
-    muted = "#8b98a5"
-
-    xs = [dt.date.fromisoformat(d) for d, _ in weekly]
-    ys = [n for _, n in weekly]
     fig, ax = plt.subplots(figsize=(width / 100, height / 100), dpi=100)
     fig.patch.set_alpha(0)
     ax.set_facecolor("none")
-    ax.fill_between(xs, ys, color=teal, alpha=0.18, linewidth=0)
-    ax.plot(xs, ys, color=teal, linewidth=2.2, solid_capstyle="round")
+    ax.tick_params(colors=MUTED, length=0, labelsize=13)
+    ax.grid(axis="y", color="#ffffff", alpha=0.07)
+    ax.set_axisbelow(True)
+    for side in ("top", "right", "left"):
+        ax.spines[side].set_visible(False)
+    ax.spines["bottom"].set_color("#30363d")
+    return plt, fig, ax
+
+
+def _svg(plt, fig) -> str:
+    import io
+    fig.tight_layout(pad=0.4)
+    buf = io.StringIO()
+    fig.savefig(buf, format="svg", transparent=True, metadata={"Date": None})
+    plt.close(fig)
+    return buf.getvalue()
+
+
+def _teal():
+    return tuple(int(v) / 255 for v in TEAL.split(","))
+
+
+def activity_line(daily: list[tuple[str, int]], width: int, height: int) -> str:
+    """Daily contributions over the last ~3 months, as an area line."""
+    import datetime as dt
+
+    import matplotlib.dates as mdates
+
+    plt, fig, ax = _figure(width, height)
+    xs = [dt.date.fromisoformat(d) for d, _ in daily]
+    ys = [n for _, n in daily]
+    ax.fill_between(xs, ys, color=_teal(), alpha=0.18, linewidth=0)
+    ax.plot(xs, ys, color=_teal(), linewidth=2, solid_capstyle="round")
     if ys and max(ys):
         i = ys.index(max(ys))
         ax.plot([xs[i]], [ys[i]], "o", color="#ffffff", markersize=5)
@@ -161,27 +189,37 @@ def activity_chart(weekly: list[tuple[str, int]], width: int, height: int) -> st
                     ha="center", color="#ffffff", fontsize=14)
     ax.xaxis.set_major_locator(mdates.MonthLocator())
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b"))
-    ax.tick_params(colors=muted, length=0, labelsize=13)
-    ax.grid(axis="y", color="#ffffff", alpha=0.07)
-    for side in ("top", "right", "left"):
-        ax.spines[side].set_visible(False)
-    ax.spines["bottom"].set_color("#30363d")
-    ax.set_ylim(bottom=0, top=(max(ys) * 1.25 if ys and max(ys) else 1))
+    ax.set_ylim(bottom=0, top=(max(ys) * 1.3 if ys and max(ys) else 1))
     ax.margins(x=0.01)
-    fig.tight_layout(pad=0.4)
+    return _svg(plt, fig)
 
-    import io
-    buf = io.StringIO()
-    fig.savefig(buf, format="svg", transparent=True, metadata={"Date": None})
-    plt.close(fig)
-    return buf.getvalue()
+
+def weekday_bars(daily: list[tuple[str, int]], width: int, height: int) -> str:
+    """Contributions per day of the week over the same ~3 months; busiest day in white."""
+    import datetime as dt
+
+    plt, fig, ax = _figure(width, height)
+    names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    totals = [0] * 7
+    for d, n in daily:
+        totals[dt.date.fromisoformat(d).weekday()] += n
+    top = max(totals)
+    colors = ["#ffffff" if t == top and top else _teal() for t in totals]
+    bars = ax.bar(names, totals, color=colors, width=0.62)
+    for bar, t in zip(bars, totals):
+        if t:
+            ax.annotate(f"{t}", (bar.get_x() + bar.get_width() / 2, t), textcoords="offset points",
+                        xytext=(0, 4), ha="center", color="#dde3ea", fontsize=13)
+    ax.set_ylim(bottom=0, top=(top * 1.3 if top else 1))
+    ax.set_yticks([])
+    return _svg(plt, fig)
 
 
 def b64(path: Path) -> str:
     return base64.b64encode(path.read_bytes()).decode()
 
 
-def build(stats: list[tuple[str, str]], weekly: list[tuple[str, int]]) -> str:
+def build(stats: list[tuple[str, str]], daily: list[tuple[str, int]]) -> str:
     rnd = random.Random(SEED)
     css, defs, sky, front = [], [], [], []
 
@@ -304,16 +342,29 @@ def build(stats: list[tuple[str, str]], weekly: list[tuple[str, int]]) -> str:
         front.append(f'<text x="{x:.1f}" y="{stat_y + 26}" font-size="16" fill="#dde3ea">{label}</text>')
     front.append("</g>")
 
-    # Activity: weekly contributions chart, revealed left-to-right on load.
-    chart_w, chart_h, chart_y = 900, 230, 712
-    chart = base64.b64encode(activity_chart(weekly, chart_w, chart_h).encode()).decode()
-    front.append(f'<g class="stats" filter="url(#shadow)" text-anchor="middle">{header(696, ACTIVITY_SECTION)}</g>')
-    defs.append(f'<clipPath id="reveal"><rect class="wipe" x="{cx - chart_w / 2}" y="{chart_y}" '
-                f'width="{chart_w}" height="{chart_h}"/></clipPath>')
-    front.append(f'<g clip-path="url(#reveal)"><image x="{cx - chart_w / 2}" y="{chart_y}" '
-                 f'width="{chart_w}" height="{chart_h}" href="data:image/svg+xml;base64,{chart}"/></g>')
+    # Under the numbers, one row: 3-month activity line | weekday bars | dancing Rick.
+    # Each chart is revealed left-to-right on load.
+    row_y, row_h, gap = 672, 200, 20
+    line_w, bars_w = 430, 300
+    rick_file, rick_frames, rick_fw, rick_fh, rick_ms = RICK
+    rick_w = rick_fw
+    x = (W - (line_w + bars_w + rick_w + 2 * gap)) / 2
+    for k, (svg_text, w) in enumerate([(activity_line(daily, line_w, row_h), line_w),
+                                       (weekday_bars(daily, bars_w, row_h), bars_w)]):
+        data = base64.b64encode(svg_text.encode()).decode()
+        defs.append(f'<clipPath id="reveal{k}"><rect class="wipe" x="{x:.0f}" y="{row_y}" '
+                    f'width="{w}" height="{row_h}"/></clipPath>')
+        front.append(f'<g clip-path="url(#reveal{k})"><image x="{x:.0f}" y="{row_y}" width="{w}" '
+                     f'height="{row_h}" href="data:image/svg+xml;base64,{data}"/></g>')
+        x += w + gap
     css.append("@keyframes wipe{from{transform:scaleX(0)}to{transform:scaleX(1)}}"
-               ".wipe{transform-box:fill-box;transform-origin:left;animation:wipe 2.2s ease-out 1.2s both}")
+               ".wipe{transform-box:fill-box;transform-origin:left;animation:wipe 2s ease-out 1.2s both}")
+    front.append(f'<svg class="stats" x="{x:.0f}" y="{row_y + (row_h - rick_fh) / 2:.0f}" width="{rick_fw}" '
+                 f'height="{rick_fh}" viewBox="0 0 {rick_fw} {rick_fh}"><image class="rick" '
+                 f'width="{rick_fw * rick_frames}" height="{rick_fh}" '
+                 f'href="data:image/png;base64,{b64(ASSETS / "sprites" / rick_file)}"/></svg>')
+    css.append(f"@keyframes rick{{to{{transform:translateX(-{rick_fw * rick_frames}px)}}}}"
+               f".rick{{animation:rick {rick_frames * rick_ms / 1000}s steps({rick_frames}) infinite}}")
 
     css.append("@keyframes fadein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}"
                ".txt{animation:fadein 1.4s ease-out both}"
@@ -334,7 +385,7 @@ def build(stats: list[tuple[str, str]], weekly: list[tuple[str, int]]) -> str:
 if __name__ == "__main__":
     user = fetch_user()
     stats = stats_from(user)
-    svg = build(stats, weekly_from(user))
+    svg = build(stats, daily_from(user))
     out = ROOT / "profile.svg"
     out.write_text(svg)
     print("ok", out, f"{len(svg) / 1024:.0f} KB", stats)
